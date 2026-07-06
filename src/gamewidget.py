@@ -57,10 +57,6 @@ class GameWidget(Widget):
         # Pre-rendered text textures (cache for performance)
         self._text_cache = {}
 
-        # Bind touch events
-        Window.bind(on_touch_down=self._on_touch_down)
-        Window.bind(on_touch_up=self._on_touch_up)
-
         # Start game loop
         Clock.schedule_interval(self.update, 1.0 / 60.0)
         self._initialized = True
@@ -109,21 +105,22 @@ class GameWidget(Widget):
         Rectangle(pos=(px, py), size=(tex_w, tex_h), texture=texture)
 
     # ── Input Handling ──────────────────────────────────────────────
-    def _on_touch_down(self, window, touch):
+    def on_touch_down(self, touch):
         if self.state == 'game_over':
             self._start_game()
-            return
+            return True
         if self.state == 'menu':
             self._start_game()
-            return
+            return True
         self._touch_start = (touch.x, touch.y)
         self._touch_time = Clock.get_time()
+        return True
 
-    def _on_touch_up(self, window, touch):
+    def on_touch_up(self, touch):
         if self.state != 'playing':
-            return
+            return True
         if self._touch_start is None:
-            return
+            return True
 
         dx = touch.x - self._touch_start[0]
         dy = touch.y - self._touch_start[1]

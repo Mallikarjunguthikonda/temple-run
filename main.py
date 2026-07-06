@@ -7,7 +7,6 @@ from kivy.config import Config
 # Configure before importing Kivy modules
 Config.set('graphics', 'resizable', False)
 Config.set('graphics', 'fullscreen', 'auto')
-Config.set('input', 'touch', 'mouse')
 Config.set('kivy', 'log_level', 'warning')
 
 from kivy.app import App
@@ -27,19 +26,7 @@ class TempleRunApp(App):
 
     def build(self):
         """Build the application UI."""
-        # Set window size for desktop testing
-        if platform == 'android':
-            # Full screen on Android
-            from kivy.core.window import Window
-            Window.fullscreen = 'auto'
-        else:
-            # Desktop: reasonable size for testing
-            Window.size = (400, 720)
-            Window.top = 50
-
         Window.clearcolor = (0.06, 0.06, 0.10, 1.0)
-
-        # Create and return the game widget
         game = GameWidget()
         return game
 

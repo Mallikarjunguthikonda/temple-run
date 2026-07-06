@@ -77,7 +77,6 @@ class GameWidget(Widget):
             font_size=font_size,
             color=color,
             bold=bold,
-            font_name='Roboto'
         )
         label.refresh()
         self._text_cache[cache_key] = label
@@ -379,7 +378,7 @@ class GameWidget(Widget):
         for sx, sy in pts:
             vertices.extend([sx, sy, 0.0, 0.0])
         Mesh(vertices=vertices, indices=[0, 1, 2, 0, 2, 3],
-             mode='triangles', fmt=[(b'v2f4', 0), (b'v2f4', 1)])
+             mode='triangles')
 
     # ── UI Screens ────────────────────────────────────────────────────
     def _draw_menu(self):

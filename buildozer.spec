@@ -23,6 +23,7 @@ android.window_background_color = 0A0A19
 android.copy_apk = 1
 android.immersive_mode = 1
 android.dark_status_bar_icons = True
+android.accept_sdk_license = True
 
 [buildozer]
 log_level = 2

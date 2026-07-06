@@ -4,6 +4,7 @@ package.name = templerun
 package.domain = org.templerun
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,ttf,txt
+version = 1.0.0
 requirements = python3,kivy
 orientation = portrait
 osx.python_version = 3

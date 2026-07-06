@@ -364,17 +364,20 @@ class GameWidget(Widget):
             ], COLOR_PLAYER_HEAD, player_z)
 
     # ── 3D Drawing Primitive ──────────────────────────────────────────
-    def _draw_quad(self, world_corners, color, player_z):
-        """Project 4 world-space corners and draw a filled quad."""
-        pts = self.camera.project_quad(world_corners, player_z)
-        if pts is None:
-            return
+    def _draw_quad(self, corners, color, player_z):
+        """Draw a filled quad. corners contain (x, y, rel_z) where rel_z is
+        distance from camera (positive = in front)."""
+        pts = []
+        for wx, wy, rel_z in corners:
+            p = self.camera.project(wx, wy, rel_z)
+            if p is None:
+                return
+            pts.append((p[0], p[1]))
 
+        Color(*color)
         vertices = []
         for sx, sy in pts:
             vertices.extend([sx, sy, 0.0, 0.0])
-
-        Color(*color)
         Mesh(vertices=vertices, indices=[0, 1, 2, 0, 2, 3],
              mode='triangles', fmt=[(b'v2f4', 0), (b'v2f4', 1)])
 

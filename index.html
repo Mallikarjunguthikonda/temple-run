@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Temple Run</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden; background: #0a0a19;
+  touch-action: none;
+  font-family: 'Segoe UI', Arial, sans-serif;
+}
+canvas {
+  display: block;
+  width: 100%; height: 100%;
+}
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<script>
+// ────────────────────────────────────────────────────────
+// Temple Run — HTML5 Canvas Edition
+// ────────────────────────────────────────────────────────
+
+const canvas = document.getElementById('gc');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ── Constants ──────────────────────────────────────────
+const SEGMENT_LENGTH = 10;
+const HALF_WIDTH = 3;
+const LANE_WIDTH = 2;
+const WALL_HEIGHT = 2.4;
+const FOV = 1.0;
+const NEAR_PLANE = 0.1;
+
+// ── Colors ─────────────────────────────────────────────
+const C = {
+  bg:           '#0a0a19',
+  floorDark:    '#2e261c',
+  floorLight:   '#3d3325',
+  wall:         '#4d4238',
+  wallEdge:     '#383028',
+  obstacleWall: '#8c2e2e',
+  obstacleBarrier: '#a64d1a',
+  obstacleBeam: '#5940a6',
+  coin:         '#ffd924',
+  coinDark:     '#b39600',
+  playerBody:   '#2680cc',
+  playerHead:   '#e6bf8c',
+  playerBodyDark:'#1a5991',
+  overlayBg:    'rgba(0,0,0,0.7)',
+  button:       '#338cd9',
+  titleGold:    '#f2bf26',
+  white:        '#ffffff',
+  gray:         '#999999',
+  dimGray:      '#808080',
+};
+
+// ── Utility ────────────────────────────────────────────
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, mn, mx) { return Math.max(mn, Math.min(mx, v)); }
+
+// ── Camera ─────────────────────────────────────────────
+class Camera {
+  project(wx, wy, wz) {
+    if (wz <= NEAR_PLANE) return null;
+    const scale = FOV / wz;
+    const sx = wx * scale * W * 0.5 + W / 2;
+    const sy = H - (wy * scale * H * 0.5 + H / 2);
+    return [sx, sy, scale];
+  }
+
+  relativeZ(worldZ, playerZ) {
+    return worldZ - playerZ;
+  }
+}
+
+// ── Player ─────────────────────────────────────────────
+class Player {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.x = 0;               // current x (smoothed)
+    this.targetX = 0;         // target lane x
+    this.y = 0;               // vertical position
+    this.z = 0;               // distance traveled
+    this.speed = 8;
+    this.SPEED_MAX = 24;
+    this.WIDTH = 0.6;
+    this.height = 1.2;
+    this.alive = true;
+    this.distance = 0;
+    this.lane = 1;            // 0, 1, 2
+    this.sliding = false;
+    this.jumping = false;
+    this.jumpVel = 0;
+    this.slideTimer = 0;
+    this.laneLerpSpeed = 12;
+  }
+
+  moveLeft() {
+    if (this.lane > 0) {
+      this.lane--;
+      this.targetX = (this.lane - 1) * LANE_WIDTH;
+    }
+  }
+
+  moveRight() {
+    if (this.lane < 2) {
+      this.lane++;
+      this.targetX = (this.lane - 1) * LANE_WIDTH;
+    }
+  }
+
+  jump() {
+    if (!this.jumping && !this.sliding) {
+      this.jumping = true;
+      this.jumpVel = 7;
+    }
+  }
+
+  slide() {
+    if (!this.sliding && !this.jumping) {
+      this.sliding = true;
+      this.slideTimer = 0.6;
+      this.height = 0.6;
+    }
+  }
+
+  update(dt) {
+    if (!this.alive) return;
+    this.distance += this.speed * dt;
+    this.z = this.distance;
+
+    // Lane smoothing
+    this.x = lerp(this.x, this.targetX, Math.min(1, this.laneLerpSpeed * dt));
+
+    // Jump physics
+    if (this.jumping) {
+      this.y += this.jumpVel * dt;
+      this.jumpVel -= 20 * dt;
+      if (this.y <= 0) {
+        this.y = 0;
+        this.jumping = false;
+        this.jumpVel = 0;
+      }
+    }
+
+    // Slide timer
+    if (this.sliding) {
+      this.slideTimer -= dt;
+      if (this.slideTimer <= 0) {
+        this.sliding = false;
+        this.height = 1.2;
+      }
+    }
+
+    // Speed increase
+    if (this.speed < this.SPEED_MAX) {
+      this.speed += 0.3 * dt;
+    }
+  }
+}
+
+// ── Segment ────────────────────────────────────────────
+let _coinOffsetCounter = 0;
+
+class Coin {
+  constructor(zOffset, lane) {
+    this.zOffset = zOffset;
+    this.lane = lane;
+    this.collected = false;
+    this.animOffset = Math.random() * Math.PI * 2;
+    this.y = 0.8;
+    this.worldX = (lane - 1) * LANE_WIDTH;
+  }
+}
+
+class Segment {
+  constructor(z) {
+    this.z = z;
+    this.hasObstacle = false;
+    this.obstacleType = null;  // 'wall', 'barrier', 'beam'
+    this.obstacleLane = 0;
+    this.coins = [];
+  }
+
+  obstacleZ() {
+    return this.z + SEGMENT_LENGTH * 0.5;
+  }
+
+  getHitbox() {
+    if (!this.hasObstacle) return null;
+    const oz = this.obstacleZ();
+    const lane = this.obstacleLane;
+    const left = -HALF_WIDTH + lane * LANE_WIDTH;
+    const right = left + LANE_WIDTH;
+
+    if (this.obstacleType === 'wall') {
+      return { x1: left, x2: right, z1: oz - 0.3, z2: oz + 0.3, y: 0, h: WALL_HEIGHT };
+    } else if (this.obstacleType === 'barrier') {
+      return { x1: left, x2: right, z1: oz - 0.25, z2: oz + 0.25, y: 0, h: 0.8 };
+    } else if (this.obstacleType === 'beam') {
+      return { x1: -HALF_WIDTH, x2: HALF_WIDTH, z1: oz - 0.25, z2: oz + 0.25, y: 1.5, h: 0.3 };
+    }
+    return null;
+  }
+}
+
+// ── Corridor ───────────────────────────────────────────
+class Corridor {
+  constructor() {
+    this.segments = [];
+    this.VISIBLE_DIST = 60;
+    this.GENERATE_AHEAD = 80;
+    this.segmentLength = SEGMENT_LENGTH;
+    this._seed = 0;
+    this.reset();
+  }
+
+  reset() {
+    this.segments = [];
+    this._seed = 42;
+    // Generate initial segments
+    for (let z = 0; z < this.GENERATE_AHEAD; z += this.segmentLength) {
+      this._addSegment(z);
+    }
+  }
+
+  _addSegment(z) {
+    const seg = new Segment(z);
+    if (z > 15) {  // no obstacles right at start
+      this._seed = (this._seed * 1103515245 + 12345) & 0x7fffffff;
+      const r = (this._seed >>> 0) / 0x7fffffff;
+      if (r < 0.35) {
+        seg.hasObstacle = true;
+        const types = ['wall', 'barrier', 'beam'];
+        const tr = (this._seed * 17 + 13) & 0x7fffffff;
+        seg.obstacleType = types[tr % 3];
+        const lr = (this._seed * 7 + 11) & 0x7fffffff;
+        seg.obstacleLane = lr % 3;
+      }
+      // Coins
+      const cr = (this._seed * 3 + 7) & 0x7fffffff;
+      if ((cr % 5) === 0 && !seg.hasObstacle) {
+        for (let i = 0; i < 3; i++) {
+          const coin = new Coin(2 + i * 2.5, i);
+          seg.coins.push(coin);
+        }
+      } else if ((cr % 7) === 0) {
+        const cl = (this._seed * 13 + 5) & 0x7fffffff;
+        const coin = new Coin(2 + (cr % 5) * 1.5, cl % 3);
+        seg.coins.push(coin);
+      }
+    }
+    this.segments.push(seg);
+  }
+
+  update(playerZ) {
+    // Remove segments behind player
+    while (this.segments.length > 0 && this.segments[0].z + this.segmentLength < playerZ - 20) {
+      this.segments.shift();
+    }
+    // Generate new segments ahead
+    let lastZ = this.segments.length > 0 ? this.segments[this.segments.length - 1].z : 0;
+    while (lastZ < playerZ + this.GENERATE_AHEAD) {
+      lastZ += this.segmentLength;
+      this._addSegment(lastZ);
+    }
+  }
+
+  getActiveSegments(playerZ) {
+    return this.segments.filter(s => {
+      const zf = s.z - playerZ;
+      const zb = s.z + this.segmentLength - playerZ;
+      return zb > 0 && zf < this.VISIBLE_DIST;
+    });
+  }
+
+  checkObstacleCollision(player) {
+    const pw = player.WIDTH / 2;
+    for (const seg of this.segments) {
+      const hb = seg.getHitbox();
+      if (!hb) continue;
+      // Check Z
+      if (player.z + 0.3 < hb.z1 || player.z - 0.3 > hb.z2) continue;
+      // Check X
+      if (player.x + pw < hb.x1 || player.x - pw > hb.x2) continue;
+      // Check Y (jump/slide)
+      const playerTop = player.y + player.height;
+      if (playerTop < hb.y || player.y > hb.y + hb.h) continue;
+      return true;
+    }
+    return false;
+  }
+
+  checkCoinCollection(player) {
+    let count = 0;
+    const pw = player.WIDTH / 2;
+    for (const seg of this.segments) {
+      for (const coin of seg.coins) {
+        if (coin.collected) continue;
+        const cz = seg.z + coin.zOffset;
+        if (Math.abs(cz - player.z) > 1.0) continue;
+        const cx = coin.worldX;
+        if (Math.abs(cx - player.x) > pw + 0.4) continue;
+        if (Math.abs(coin.y - player.y) > 0.8) continue;
+        coin.collected = true;
+        count++;
+      }
+    }
+    return count;
+  }
+}
+
+// ── Game ───────────────────────────────────────────────
+class Game {
+  constructor() {
+    this.camera = new Camera();
+    this.player = new Player();
+    this.corridor = new Corridor();
+    this.state = 'menu';      // 'menu', 'playing', 'game_over'
+    this.score = 0;
+    this.coinsCollected = 0;
+    this.gameTime = 0;
+    this.highScore = parseInt(localStorage.getItem('templeRunHighScore') || '0');
+    this.lastTime = performance.now();
+
+    // Touch state
+    this._touchStart = null;
+
+    // Bind input
+    this._setupInput();
+  }
+
+  _setupInput() {
+    // Touch
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const t = e.changedTouches[0];
+      if (this.state === 'game_over' || this.state === 'menu') {
+        this._startGame();
+        return;
+      }
+      this._touchStart = { x: t.clientX, y: t.clientY, time: performance.now() };
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      if (this.state !== 'playing') return;
+      if (!this._touchStart) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - this._touchStart.x;
+      const dy = t.clientY - this._touchStart.y;
+      const minSwipe = 30;
+
+      if (Math.abs(dx) > minSwipe || Math.abs(dy) > minSwipe) {
+        if (Math.abs(dx) > Math.abs(dy)) {
+          if (dx > 0) this.player.moveRight();
+          else this.player.moveLeft();
+        } else {
+          if (dy > 0) this.player.slide();
+          else this.player.jump();
+        }
+      }
+      this._touchStart = null;
+    }, { passive: false });
+
+    // Keyboard
+    document.addEventListener('keydown', (e) => {
+      if (this.state === 'menu' || this.state === 'game_over') {
+        if (e.key === ' ' || e.key === 'Enter') {
+          this._startGame();
+          e.preventDefault();
+        }
+        return;
+      }
+      switch (e.key) {
+        case 'ArrowLeft':  case 'a': this.player.moveLeft(); e.preventDefault(); break;
+        case 'ArrowRight': case 'd': this.player.moveRight(); e.preventDefault(); break;
+        case 'ArrowUp':    case 'w': this.player.jump(); e.preventDefault(); break;
+        case 'ArrowDown':  case 's': this.player.slide(); e.preventDefault(); break;
+      }
+    });
+
+    // Mouse click for menu/gameover
+    canvas.addEventListener('click', () => {
+      if (this.state === 'menu' || this.state === 'game_over') {
+        this._startGame();
+      }
+    });
+  }
+
+  _startGame() {
+    this.player.reset();
+    this.corridor.reset();
+    this.state = 'playing';
+    this.score = 0;
+    this.coinsCollected = 0;
+    this.gameTime = 0;
+  }
+
+  update(dt) {
+    dt = Math.min(dt, 0.05);
+
+    if (this.state === 'playing') {
+      this.gameTime += dt;
+      this.player.update(dt);
+      this.corridor.update(this.player.z);
+      this.score = Math.floor(this.player.distance);
+
+      // Obstacle collision
+      if (this.corridor.checkObstacleCollision(this.player)) {
+        this.player.alive = false;
+        this.state = 'game_over';
+        if (this.score > this.highScore) {
+          this.highScore = this.score;
+          localStorage.setItem('templeRunHighScore', String(this.highScore));
+        }
+      }
+
+      // Coin collection
+      const coins = this.corridor.checkCoinCollection(this.player);
+      if (coins > 0) {
+        this.coinsCollected += coins;
+        this.score += coins * 10;
+      }
+    }
+  }
+
+  render() {
+    ctx.fillStyle = C.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    if (this.state === 'menu') {
+      this._drawMenu();
+      return;
+    }
+
+    this._drawCorridor();
+    this._drawHUD();
+
+    if (this.state === 'game_over') {
+      this._drawGameOver();
+    }
+  }
+
+  // ── 3D Rendering ─────────────────────────────────────
+  _drawCorridor() {
+    const pz = this.player.z;
+    const active = this.corridor.getActiveSegments(pz);
+    active.sort((a, b) => b.z - a.z);
+
+    for (const seg of active) {
+      this._drawSegment(seg, pz);
+    }
+    this._drawPlayer(pz);
+  }
+
+  _drawSegment(seg, pz) {
+    const zf = this.camera.relativeZ(seg.z, pz);
+    const zb = this.camera.relativeZ(seg.z + SEGMENT_LENGTH, pz);
+
+    if (zb <= 0 && zf <= 0) return;
+    const zfAdj = zf <= 0 ? 0.1 : zf;
+    const zbAdj = zb <= 0 ? 0.1 : zb;
+
+    // Floor tiles
+    const tileIndex = Math.floor(seg.z / SEGMENT_LENGTH);
+    for (let lane = 0; lane < 3; lane++) {
+      const left = -HALF_WIDTH + lane * LANE_WIDTH;
+      const right = left + LANE_WIDTH;
+      const isDark = (lane + tileIndex) % 2 === 0;
+      const color = isDark ? C.floorDark : C.floorLight;
+      this._drawQuad([
+        [left, 0, zfAdj], [right, 0, zfAdj],
+        [right, 0, zbAdj], [left, 0, zbAdj]
+      ], color);
+    }
+
+    // Left wall
+    this._drawQuad([
+      [-HALF_WIDTH, 0, zfAdj], [-HALF_WIDTH, WALL_HEIGHT, zfAdj],
+      [-HALF_WIDTH, WALL_HEIGHT, zbAdj], [-HALF_WIDTH, 0, zbAdj]
+    ], C.wall);
+    this._drawQuad([
+      [-HALF_WIDTH, WALL_HEIGHT, zfAdj], [-HALF_WIDTH + 0.15, WALL_HEIGHT, zfAdj],
+      [-HALF_WIDTH + 0.15, WALL_HEIGHT, zbAdj], [-HALF_WIDTH, WALL_HEIGHT, zbAdj]
+    ], C.wallEdge);
+
+    // Right wall
+    this._drawQuad([
+      [HALF_WIDTH, 0, zfAdj], [HALF_WIDTH, WALL_HEIGHT, zfAdj],
+      [HALF_WIDTH, WALL_HEIGHT, zbAdj], [HALF_WIDTH, 0, zbAdj]
+    ], C.wall);
+    this._drawQuad([
+      [HALF_WIDTH - 0.15, WALL_HEIGHT, zfAdj], [HALF_WIDTH, WALL_HEIGHT, zfAdj],
+      [HALF_WIDTH, WALL_HEIGHT, zbAdj], [HALF_WIDTH - 0.15, WALL_HEIGHT, zbAdj]
+    ], C.wallEdge);
+
+    // Obstacle
+    if (seg.hasObstacle) {
+      this._drawObstacle(seg, pz);
+    }
+
+    // Coins
+    for (const coin of seg.coins) {
+      if (!coin.collected) {
+        this._drawCoin(coin, seg.z, pz);
+      }
+    }
+  }
+
+  _drawObstacle(seg, pz) {
+    const zObs = this.camera.relativeZ(seg.obstacleZ(), pz);
+    if (zObs <= 0) return;
+
+    const lane = seg.obstacleLane;
+    const left = -HALF_WIDTH + lane * LANE_WIDTH;
+    const right = left + LANE_WIDTH;
+
+    if (seg.obstacleType === 'wall') {
+      this._drawBox(left, right, 0, WALL_HEIGHT, zObs, C.obstacleWall, 0.3);
+    } else if (seg.obstacleType === 'barrier') {
+      this._drawBox(left, right, 0, 0.8, zObs, C.obstacleBarrier, 0.25);
+    } else if (seg.obstacleType === 'beam') {
+      this._drawBox(-HALF_WIDTH, HALF_WIDTH, 1.5, 1.8, zObs, C.obstacleBeam, 0.25);
+    }
+  }
+
+  _drawBox(left, right, yBot, yTop, zObs, color, depth) {
+    // Front face
+    this._drawQuad([
+      [left, yBot, zObs], [right, yBot, zObs],
+      [right, yTop, zObs], [left, yTop, zObs]
+    ], color);
+    // Top face (darker)
+    this._drawQuad([
+      [left, yTop, zObs], [right, yTop, zObs],
+      [right, yTop, zObs - depth], [left, yTop, zObs - depth]
+    ], this._darken(color, 0.7));
+    // Side face (even darker)
+    this._drawQuad([
+      [right, yBot, zObs], [right, yTop, zObs],
+      [right, yTop, zObs - depth], [right, yBot, zObs - depth]
+    ], this._darken(color, 0.5));
+  }
+
+  _drawCoin(coin, segZ, pz) {
+    const zCoin = this.camera.relativeZ(segZ + coin.zOffset, pz);
+    if (zCoin <= 0) return;
+
+    const cx = coin.worldX;
+    const spin = Math.cos(this.gameTime * 4 + coin.animOffset);
+    const visibleW = Math.abs(spin);
+    if (visibleW < 0.05) return;
+
+    const halfW = 0.3 * visibleW;
+    const halfH = 0.3;
+    const brightness = 0.6 + 0.4 * Math.abs(spin);
+
+    this._drawQuad([
+      [cx - halfW, coin.y - halfH, zCoin],
+      [cx + halfW, coin.y - halfH, zCoin],
+      [cx + halfW, coin.y + halfH, zCoin],
+      [cx - halfW, coin.y + halfH, zCoin]
+    ], this._brighten(C.coin, brightness));
+  }
+
+  _drawPlayer(pz) {
+    const p = this.player;
+    const pzR = this.camera.relativeZ(p.z, pz);
+    if (pzR <= 0) return;
+
+    const hw = p.WIDTH / 2;
+    const bodyH = p.height;
+    const yBot = p.y;
+    const d = 0.25;
+
+    // Body front
+    this._drawQuad([
+      [p.x - hw, yBot, pzR], [p.x + hw, yBot, pzR],
+      [p.x + hw, yBot + bodyH, pzR], [p.x - hw, yBot + bodyH, pzR]
+    ], C.playerBody);
+
+    // Body side (depth)
+    this._drawQuad([
+      [p.x + hw, yBot, pzR], [p.x + hw, yBot + bodyH, pzR],
+      [p.x + hw, yBot + bodyH, pzR - d], [p.x + hw, yBot, pzR - d]
+    ], C.playerBodyDark);
+
+    // Head (only when not sliding)
+    if (!p.sliding) {
+      const headY = yBot + bodyH;
+      this._drawQuad([
+        [p.x - 0.2, headY, pzR], [p.x + 0.2, headY, pzR],
+        [p.x + 0.2, headY + 0.25, pzR], [p.x - 0.2, headY + 0.25, pzR]
+      ], C.playerHead);
+    }
+  }
+
+  // ── Drawing Primitives ───────────────────────────────
+  _drawQuad(corners, color) {
+    // corners: [[x, y, z], ...] where z is relative to camera
+    const pts = [];
+    for (const [wx, wy, wz] of corners) {
+      const p = this.camera.project(wx, wy, wz);
+      if (!p) return;
+      pts.push([p[0], p[1]]);
+    }
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) {
+      ctx.lineTo(pts[i][0], pts[i][1]);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  _darken(hex, factor) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgb(${Math.floor(r * factor)},${Math.floor(g * factor)},${Math.floor(b * factor)})`;
+  }
+
+  _brighten(hex, factor) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgb(${Math.min(255, Math.floor(r * factor))},${Math.min(255, Math.floor(g * factor))},${Math.min(255, Math.floor(b * factor))})`;
+  }
+
+  // ── UI Screens ───────────────────────────────────────
+  _drawText(text, x, y, size, color, opts = {}) {
+    ctx.save();
+    ctx.textAlign = opts.align || 'center';
+    ctx.textBaseline = opts.baseline || 'middle';
+    ctx.fillStyle = color;
+    ctx.font = `${opts.bold ? 'bold ' : ''}${size}px 'Segoe UI', Arial, sans-serif`;
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  _drawMenu() {
+    const cx = W / 2;
+    const cy = H / 2;
+
+    this._drawText('TEMPLE RUN', cx, cy - H * 0.15, Math.min(52, W * 0.07), C.titleGold, { bold: true });
+    this._drawText('Arrow keys to move • Space to start', cx, cy - H * 0.03, Math.min(16, W * 0.022), C.gray);
+    this._drawText('↑ Jump  •  ↓ Slide  •  ← → Move', cx, cy + H * 0.02, Math.min(14, W * 0.02), C.dimGray);
+    this._drawText('TAP OR PRESS SPACE TO START', cx, cy + H * 0.08, Math.min(22, W * 0.03), C.button, { bold: true });
+
+    // Controls hint
+    this._drawText('← → Move  |  ↑ Jump  |  ↓ Slide', cx, H * 0.08, Math.min(14, W * 0.018), C.dimGray);
+
+    if (this.highScore > 0) {
+      this._drawText(`High Score: ${this.highScore}`, cx, cy + H * 0.16, Math.min(18, W * 0.025), C.gray);
+    }
+  }
+
+  _drawHUD() {
+    if (this.state !== 'playing' && this.state !== 'game_over') return;
+
+    const cx = W / 2;
+    this._drawText(`${this.score}`, cx, H * 0.06, Math.min(40, W * 0.055), C.white, { bold: true });
+
+    // Coin count
+    this._drawText(`\u25CB ${this.coinsCollected}`, W * 0.08, H * 0.06, Math.min(18, W * 0.025), C.coin);
+
+    // Speed
+    const speedPct = Math.floor((this.player.speed / this.player.SPEED_MAX) * 100);
+    this._drawText(`${speedPct}%`, W * 0.92, H * 0.06, Math.min(18, W * 0.025), C.gray, { align: 'right' });
+  }
+
+  _drawGameOver() {
+    // Dim overlay
+    ctx.fillStyle = C.overlayBg;
+    ctx.fillRect(0, 0, W, H);
+
+    const cx = W / 2;
+    const cy = H / 2;
+
+    this._drawText('GAME OVER', cx, cy - H * 0.13, Math.min(46, W * 0.06), '#e63333', { bold: true });
+    this._drawText(`Score: ${this.score}`, cx, cy - H * 0.03, Math.min(28, W * 0.035), C.white);
+    this._drawText(`Coins: ${this.coinsCollected}`, cx, cy + H * 0.02, Math.min(20, W * 0.028), C.coin);
+
+    if (this.score >= this.highScore && this.score > 0) {
+      this._drawText('NEW HIGH SCORE!', cx, cy + H * 0.08, Math.min(18, W * 0.025), C.coin, { bold: true });
+    }
+
+    this._drawText('TAP TO RETRY', cx, cy + H * 0.16, Math.min(24, W * 0.03), C.button, { bold: true });
+  }
+}
+
+// ── Main Loop ──────────────────────────────────────────
+const game = new Game();
+let lastFrame = performance.now();
+
+function gameLoop(now) {
+  const dt = (now - lastFrame) / 1000;
+  lastFrame = now;
+
+  game.update(dt);
+  game.render();
+
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
